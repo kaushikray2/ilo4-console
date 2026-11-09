@@ -119,28 +119,45 @@ def find_server(sid):
 class _AuthNeeded(Exception): pass
 class _NoSession(Exception): pass
 
+class _SentUnknown(Exception):
+    """The request reached the iLO but the response never arrived (read
+    timeout or a drop mid-response). The action may have taken effect."""
+
 class _IloClient:
     """One persistent HTTPS connection + Redfish session token per iLO.
-    Measured against a Gen8 iLO 4: ~0.26-0.85 s/call vs ~2.34 s for a fresh TLS +
-    Basic-auth connection per call. All use is serialized per server
-    (the iLO serializes requests internally anyway)."""
+    The connection is disposable, the session is not: a dropped or
+    idle-closed connection is reopened with the SAME token, so a
+    keep-alive close never mints a new iLO session (sessions are a
+    scarce, table-limited resource on iLO 4 and each orphan lives
+    until its idle timeout). A new session is created only after a
+    401. Non-GET requests are never retried once sent - a power
+    action may have taken effect even when its response is lost."""
     def __init__(self, server):
         self.host = server['host']; self.user = server.get('username', ''); self.pw = server.get('password', '')
         self.lock = threading.RLock(); self.conn = None; self.token = None; self.session_ok = None; self.redir = {}; self.sess_path = None; self.fail_at = 0
-    def close_session(self):
-        with self.lock:
-            if self.conn is not None and self.token and self.sess_path:
-                try:
-                    self.conn.request('DELETE', self.sess_path, headers={'X-Auth-Token': self.token})
-                    r = self.conn.getresponse(); r.read()
-                except Exception: pass
-            self._drop(); self.sess_path = None
-    def _drop(self):
+    def _drop_conn(self):
         try:
             if self.conn: self.conn.close()
         except Exception: pass
-        self.conn = None; self.token = None
+        self.conn = None
+    def _delete_session(self):
+        if self.token and self.sess_path:
+            c = self.conn
+            try:
+                if c is None: c = http.client.HTTPSConnection(self.host, 443, context=_SSL, timeout=10)
+                c.request('DELETE', self.sess_path, headers={'X-Auth-Token': self.token})
+                r = c.getresponse(); r.read()
+            except Exception: pass
+            finally:
+                if c is not None and c is not self.conn:
+                    try: c.close()
+                    except Exception: pass
+        self.token = None; self.sess_path = None
+    def close_session(self):
+        with self.lock:
+            self._delete_session(); self._drop_conn()
     def _login(self):
+        self._delete_session()
         c = http.client.HTTPSConnection(self.host, 443, context=_SSL, timeout=30)
         payload = json.dumps({'UserName': self.user, 'Password': self.pw})
         path = '/redfish/v1/SessionService/Sessions/'
@@ -161,23 +178,32 @@ class _IloClient:
         self.session_ok = True; self.token = tok; self.conn = c
         loc = r.getheader('Location')
         self.sess_path = urlparse(loc).path if loc else None
+    def _connect(self):
+        if self.token is None: self._login()
+        elif self.conn is None: self.conn = http.client.HTTPSConnection(self.host, 443, context=_SSL, timeout=30)
     def request(self, method, path, body=None, timeout=6):
         if self.session_ok is False and time.time() - self.fail_at < 60: raise _NoSession('session login cooling down')
         if self.session_ok is False: self.session_ok = None
         with self.lock:
-            t0 = time.time(); last = None
-            for attempt in range(3):
+            t0 = time.time(); last = None; relogged = False
+            for attempt in range(4):
                 try:
-                    if self.conn is None or self.token is None: self._login()
+                    if self.conn is None: self._connect()
                     return self._once(method, path, body, t0)
                 except _NoSession: raise
+                except urllib.error.HTTPError: raise
+                except _SentUnknown as e:
+                    self._drop_conn()
+                    if method != 'GET':
+                        raise RuntimeError('the request reached the iLO but its response timed out - the action may have taken effect, so it was not retried') from e
+                    last = e
                 except _AuthNeeded:
-                    self._drop()
-                    if attempt == 2: raise RuntimeError('iLO session rejected after re-login')
-                except Exception as e:
-                    last = e; self._drop()
-                    if attempt == 2: raise
-            raise last
+                    self._drop_conn(); self.token = None; self.sess_path = None
+                    if relogged: raise RuntimeError('iLO session rejected after re-login')
+                    relogged = True
+                except (http.client.HTTPException, OSError) as e:
+                    self._drop_conn(); last = e
+            raise last if last is not None else RuntimeError('iLO request failed')
     def _once(self, method, path, body, t0):
         from urllib.parse import urljoin
         data = json.dumps(body) if body is not None else None
@@ -186,7 +212,10 @@ class _IloClient:
             headers = {'X-Auth-Token': self.token, 'Accept': 'application/json'}
             if cur_data is not None: headers['Content-Type'] = 'application/json'
             self.conn.request(cur_method, cur_path, cur_data, headers)
-            r = self.conn.getresponse(); raw = r.read()
+            try:
+                r = self.conn.getresponse(); raw = r.read()
+            except Exception as e:
+                raise _SentUnknown(str(e)) from e
             if r.status in (301, 302, 303, 307, 308) and r.getheader('Location'):
                 u = urlparse(urljoin(f'https://{self.host}{cur_path}', r.getheader('Location')))
                 cur_path = u.path + (('?' + u.query) if u.query else '')
@@ -552,4 +581,9 @@ if __name__ == "__main__":
             save_servers(load_servers()); print("migrated saved iLO passwords to encrypted storage", flush=True)
     except Exception: pass
     threading.Thread(target=_refresher, daemon=True).start()
+    import signal as _signal
+    def _shutdown(signum, frame):
+        _close_all_sessions()  # DELETE our Redfish sessions so a container stop leaves no orphans on the iLOs
+        raise SystemExit(0)
+    _signal.signal(_signal.SIGTERM, _shutdown); _signal.signal(_signal.SIGINT, _shutdown)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
