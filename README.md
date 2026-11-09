@@ -2,7 +2,7 @@
 
 A modern, lightweight web console for HPE iLO 4 — the management processor in ProLiant Gen8 and Gen9 servers. It replaces the dated iLO web interface with a fast fleet dashboard and a clean per-server view, and talks to each iLO over its Redfish API. Everything runs in a single small Docker container.
 
-![Version](https://img.shields.io/badge/version-v0.02-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![Version](https://img.shields.io/badge/version-v0.03-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ## Features
 
@@ -65,4 +65,4 @@ MIT — see [LICENSE](LICENSE).
 
 Developed by [SiliconBrane Inc.](https://siliconbrane.com)
 
-Version **v0.02**
+Version **v0.03**

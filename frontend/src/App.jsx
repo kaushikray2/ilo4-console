@@ -200,7 +200,7 @@ export default function App() {
         </>}
       </section>
     </main>
-    <footer className="foot">Developed by <a href="https://siliconbrane.com" target="_blank" rel="noreferrer">SiliconBrane Inc.</a> · v0.02</footer>
+    <footer className="foot">Developed by <a href="https://siliconbrane.com" target="_blank" rel="noreferrer">SiliconBrane Inc.</a> · v0.03</footer>
     {dlg && <dialog ref={dlgRef}>
       <form onSubmit={saveDlg}>
         <h3 style={{ margin: '4px 0' }}>{dlg === 'add' ? 'Add server' : 'Edit server'}</h3>

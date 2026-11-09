@@ -47,13 +47,15 @@ def drop_session(tok):
     with _AUTH_LOCK: _SESSIONS.pop(tok, None)
 def _key():
     try:
-        with open(KEY_FILE, "rb") as f: return f.read().strip()
-    except Exception:
-        k = secrets.token_bytes(32)
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(KEY_FILE, "wb") as f: f.write(k)
-        os.chmod(KEY_FILE, 0o600)
-        return k
+        with open(KEY_FILE, "rb") as f:
+            k = f.read()
+            if len(k) == 32: return k
+    except Exception: pass
+    k = secrets.token_bytes(32)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(KEY_FILE, "wb") as f: f.write(k)
+    os.chmod(KEY_FILE, 0o600)
+    return k
 def _stream(key, nonce, n):
     out = b""; ctr = 0
     while len(out) < n:
@@ -189,7 +191,7 @@ class _IloClient:
             for attempt in range(4):
                 try:
                     if self.conn is None: self._connect()
-                    return self._once(method, path, body, t0)
+                    return self._once(method, path, body, t0, timeout)
                 except _NoSession: raise
                 except urllib.error.HTTPError: raise
                 except _SentUnknown as e:
@@ -204,13 +206,15 @@ class _IloClient:
                 except (http.client.HTTPException, OSError) as e:
                     self._drop_conn(); last = e
             raise last if last is not None else RuntimeError('iLO request failed')
-    def _once(self, method, path, body, t0):
+    def _once(self, method, path, body, t0, timeout=30):
         from urllib.parse import urljoin
         data = json.dumps(body) if body is not None else None
         cur_path, cur_method, cur_data = self.redir.get(path, path), method, data
         for hop in range(6):
             headers = {'X-Auth-Token': self.token, 'Accept': 'application/json'}
             if cur_data is not None: headers['Content-Type'] = 'application/json'
+            self.conn.timeout = timeout
+            if self.conn.sock is not None: self.conn.sock.settimeout(timeout)
             self.conn.request(cur_method, cur_path, cur_data, headers)
             try:
                 r = self.conn.getresponse(); raw = r.read()
@@ -240,12 +244,20 @@ def _close_all_sessions():
 
 import atexit; atexit.register(_close_all_sessions)
 def _client_for(server):
-    key = (server['id'], server.get('username', ''), server.get('password', ''))
+    key = (server['id'], server['host'], server.get('username', ''), server.get('password', ''))
     with _CLIENTS_LOCK:
         c = _CLIENTS.get(key)
         if c is None:
             c = _IloClient(server); _CLIENTS[key] = c
         return c
+
+def _evict_client(sid):
+    with _CLIENTS_LOCK:
+        victims = [k for k in _CLIENTS if k[0] == sid]
+        clients = [_CLIENTS.pop(k) for k in victims]
+    for c in clients:
+        try: c.close_session()
+        except Exception: pass
 
 def _redfish_legacy(server, method, path, body=None, timeout=6):
     from urllib.parse import urljoin
@@ -373,14 +385,12 @@ def fetch_logs(server):
             return [shape(m) for m in reversed(members[:50])]
         links = [m.get("@odata.id") for m in (body.get("Members") or []) if m.get("@odata.id")]
         if links:
-            def one(url):
+            got = []
+            for url in links[-30:]:
                 try:
                     e, _ = redfish(server, "GET", url, timeout=8)
-                    return shape(e) if e.get("Message") else None
-                except Exception:
-                    return None
-            with ThreadPoolExecutor(max_workers=6) as ex:
-                got = [r for r in ex.map(one, links[:30]) if r]
+                    if e.get("Message"): got.append(shape(e))
+                except Exception: pass
             if got:
                 return list(reversed(got))
     return []
@@ -489,10 +499,10 @@ class Handler(BaseHTTPRequestHandler):
                             for k in ("name","host","username","group","location","model_note"):
                                 if k in b: s[k] = b[k]
                             if b.get("password"): s["password"] = b["password"]
-                            save_servers(servers); return self.send_json(200, public(s))
+                            _evict_client(sid); cache_drop(sid); save_servers(servers); return self.send_json(200, public(s))
             if len(parts) == 3 and method == "DELETE":
                 with _LOCK: save_servers([s for s in load_servers() if s["id"] != sid])
-                cache_drop(sid)
+                _evict_client(sid); cache_drop(sid)
                 audit("server_remove", ip, server=server.get("name") or server["host"], host=server["host"])
                 return self.send_json(200, {"ok": True})
             if len(parts) == 4 and parts[3] == "status" and method == "GET":
