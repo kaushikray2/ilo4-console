@@ -57,6 +57,16 @@ One container, two parts:
 - A Python (standard library only) service that serves the UI, keeps the server registry, polls each iLO in the background (status ~25 s, thermal ~45 s, logs ~2 min), and proxies power actions live.
 - A React front end built at image-build time — the runtime image is just `python:3.12-alpine` (~75 MB), with no runtime dependencies to install or update.
 
+## Development
+
+The backend has a stdlib-only test suite that runs against a mock iLO - no hardware needed:
+
+```bash
+sudo python3 -m unittest discover -s tests -v
+```
+
+(The mock binds port 443, hence sudo; if 443 is already taken on your host, the test file's header documents a network-namespace alternative.)
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
