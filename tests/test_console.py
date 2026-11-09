@@ -6,6 +6,11 @@ to bind it - on Linux run with sudo, or grant CAP_NET_BIND_SERVICE):
 
     sudo python3 -m unittest discover -s tests -v
 
+If something already occupies port 443 on the host, run just the
+client-session class inside a private network namespace instead:
+
+    sudo unshare -n bash -c 'ip link set lo up; python3 -m unittest test_console.TestClientSessions'
+
 Stdlib only, like the app itself. No real iLO is ever contacted: every
 server record in these tests points at 127.0.0.1.
 """
@@ -303,7 +308,7 @@ class TestApi(unittest.TestCase):
                                  {"name": "Mock", "host": "127.0.0.1",
                                   "username": "Administrator", "password": "ilo-pw"},
                                  cookie=self.cookie)
-        self.assertEqual(code, 200)
+        self.assertEqual(code, 201)
         type(self).sid = body["id"]
         with open(os.path.join(TEST_DATA, "servers.json")) as f:
             raw = f.read()
